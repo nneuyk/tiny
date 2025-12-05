@@ -1,162 +1,129 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Servo.h>
-#include "ICM_42688.h"
 
 //IMU: ICM42688 (SPI CS_42688 --> SPI3_NSS (PA15))
-SPIClass spi3(PB4, PB3, PB5);  // MOSI, MISO, SCK for SPI3
+//pins
+#define IMU_CS     PA15    // SPI3_NSS
+#define SPI_SCK    PA5    // SPI1_SCK
+#define SPI_MISO   PA6    // SPI1_MISO
+#define SPI_MOSI   PA7    // SPI1_MOSI
+#define IMU_INT    PA0     // assumed interrupt pin
 
-#define IMU_CS PA15
-#define SERVO_PITCH PA1
-#define SERVO_ROLL PA2
+#define SERVO1 PA1
+#define SERVO2 PA2
 
-// Servo objects
-Servo servoPitch;
-Servo servoRoll;
+//icm42688 register addresses idk what this is chatgpt bork hai add
+#define REG_PWR_MGMT0   0x4E
+#define REG_GYRO_CONFIG0 0x4F
+#define REG_ACCEL_CONFIG0 0x50
+#define REG_ACCEL_DATA_X1 0x09 // High byte of accel X
+#define REG_GYRO_DATA_X1  0x11 // High byte of gyro X
 
-// Servo center positions
-int pitchCenter = 90;
-int rollCenter = 90;
+// ------------------ SPI SETTINGS ------------------------
+SPISettings imuSPI(1e6, MSBFIRST, SPI_MODE0);
 
-// Servo angle limits mai roo tong tao rai
-const int servoMin = 45;
-const int servoMax = 135;
-const float maxTiltAngle = 30.0;  // Max tilt angle in degrees
+Servo servo1, servo2;
 
-// IMU object
-ICM_42688 imu;
-
-// IMU data
-float accelX, accelY, accelZ;
-float gyroX, gyroY, gyroZ;
-float pitch = 0, roll = 0;
-
-// Timing
-unsigned long lastUpdateTime = 0;
-const unsigned long updateInterval = 20;  // 50 Hz update rate
-
-//=== Function Prototypes ===//
-void imu_init();
-void readIMU();
-void updateServoAngles();
-float mapAngleToServo(float angle, float minAngle, float maxAngle);
-
-//=== IMU Initialization ===//
-void imu_init() {
-  Serial.println("Initializing IMU...");
-  delay(100);
-  
-  // Begin SPI communication with IMU
-  if (imu.begin(IMU_CS, spi3) != ICM_42688_Stat_Ok) {
-    Serial.println("ERROR: IMU initialization failed!");
-    while (1);  // Halt if IMU fails
-  }
-  
-  // Configure IMU settings
-  imu.setAccelFS_g(8);  // 8G range for accelerometer
-  imu.setGyroFS_dps(500);  // 500 DPS range for gyroscope
-  imu.setAccelODR(44.8);  // Sample rate in Hz
-  imu.setGyroODR(44.8);
-  
-  Serial.println("IMU initialized successfully!");
+// ------------ Helper: Write 8-bit register --------------
+void imuWrite(uint8_t reg, uint8_t val)
+{
+    SPI.beginTransaction(imuSPI);
+    digitalWrite(IMU_CS, LOW);
+    SPI.transfer(reg);
+    SPI.transfer(val);
+    digitalWrite(IMU_CS, HIGH);
+    SPI.endTransaction();
 }
 
-//=== Read IMU Data ===//
-void readIMU() {
-  // Check if new data is available
-  if (imu.getINT_status() & ICM_INT_DATA_RDY) {
-    imu.getAGMT();  // Read accelerometer, gyroscope, magnetometer, temperature
-    
-    accelX = imu.accData[0];
-    accelY = imu.accData[1];
-    accelZ = imu.accData[2];
-    
-    gyroX = imu.gyrData[0];
-    gyroY = imu.gyrData[1];
-    gyroZ = imu.gyrData[2];
-    
-    // Calculate pitch and roll from accelerometer
-    // Pitch = atan2(accelY, accelZ)
-    // Roll = atan2(-accelX, accelZ)
-    pitch = atan2(accelY, accelZ) * 180.0 / PI;
-    roll = atan2(-accelX, accelZ) * 180.0 / PI;
-  }
+// ------------ Helper: Read 8-bit register ---------------
+uint8_t imuRead(uint8_t reg)
+{
+    SPI.beginTransaction(imuSPI);
+    digitalWrite(IMU_CS, LOW);
+    SPI.transfer(reg | 0x80); // Read bit
+    uint8_t val = SPI.transfer(0x00);
+    digitalWrite(IMU_CS, HIGH);
+    SPI.endTransaction();
+    return val;
 }
 
-//=== Update Servo Angles ===//
-void updateServoAngles() {
-  // Map pitch angle (-30 to +30) to servo angle (45 to 135)
-  int pitchServoAngle = mapAngleToServo(pitch, -maxTiltAngle, maxTiltAngle);
-  
-  // Map roll angle (-30 to +30) to servo angle (45 to 135)
-  int rollServoAngle = mapAngleToServo(roll, -maxTiltAngle, maxTiltAngle);
-  
-  // Constrain to servo range
-  pitchServoAngle = constrain(pitchServoAngle, servoMin, servoMax);
-  rollServoAngle = constrain(rollServoAngle, servoMin, servoMax);
-  
-  // Write to servos
-  servoPitch.write(pitchServoAngle);
-  servoRoll.write(rollServoAngle);
+// ------------ Read 16-bit accel value -------------------
+int16_t readAccelX()
+{
+    uint8_t hi = imuRead(REG_ACCEL_DATA_X1);
+    uint8_t lo = imuRead(REG_ACCEL_DATA_X1 + 1);
+    return (int16_t)((hi << 8) | lo);
 }
 
-//=== Map Angle to Servo Position ===//
-float mapAngleToServo(float angle, float minAngle, float maxAngle) {
-  // Map angle range to servo angle range (0-180)
-  float mapped = map(angle * 100, minAngle * 100, maxAngle * 100, 
-                     servoMin * 100, servoMax * 100);
-  return mapped / 100.0;
+// ------------ Read 16-bit gyro value --------------------
+int16_t readGyroX()
+{
+    uint8_t hi = imuRead(REG_GYRO_DATA_X1);
+    uint8_t lo = imuRead(REG_GYRO_DATA_X1 + 1);
+    return (int16_t)((hi << 8) | lo);
 }
 
-//=== Setup ===//
-void setup() {
-  // Initialize serial for debugging
-  Serial.begin(115200);
-  delay(500);
-  
-  Serial.println("Mini Helicopter Rotor Control System Starting...");
-  
-  // Initialize SPI3
-  spi3.begin();
-  
-  // Set IMU CS pin
-  pinMode(IMU_CS, OUTPUT);
-  digitalWrite(IMU_CS, HIGH);
-  
-  // Initialize IMU
-  imu_init();
-  
-  // Initialize servos
-  servoPitch.attach(SERVO_PITCH);
-  servoRoll.attach(SERVO_ROLL);
-  
-  // Set servos to center position
-  servoPitch.write(pitchCenter);
-  servoRoll.write(rollCenter);
-  
-  lastUpdateTime = millis();
-  Serial.println("System ready!");
+//imu setup
+void imuInit()
+{
+    delay(50);
+
+    // Enable accelerometer + gyro
+    imuWrite(REG_PWR_MGMT0, 0x0F);
+
+    // Gyro config: ±2000 dps, ODR=1kHz
+    imuWrite(REG_GYRO_CONFIG0, 0x06);
+
+    // Accel config: ±16g, ODR=1kHz
+    imuWrite(REG_ACCEL_CONFIG0, 0x06);
+
+    delay(20);
 }
 
-//=== Main Loop ===//
-void loop() {
-  unsigned long currentTime = millis();
-  
-  // Update at specified interval
-  if (currentTime - lastUpdateTime >= updateInterval) {
-    lastUpdateTime = currentTime;
-    
-    // Read IMU data
-    readIMU();
-    
-    // Update servo positions based on IMU data
-    updateServoAngles();
-    
-    // Optional: Print debug information
-    Serial.print("Pitch: ");
-    Serial.print(pitch, 2);
-    Serial.print("° | Roll: ");
-    Serial.print(roll, 2);
-    Serial.println("°");
-  }
+//setup
+void setup()
+{
+    // SPI + pins
+    pinMode(IMU_CS, OUTPUT);
+    digitalWrite(IMU_CS, HIGH);
+
+    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+
+    // IMU interrupt pin (if used)
+    pinMode(IMU_INT, INPUT);
+
+    // Serial output
+    Serial.begin(115200);
+    delay(200);
+
+    // Initialize IMU without WHO_AM_I
+    imuInit();
+
+    // Attach servos
+    servo1.attach(SERVO1);
+    servo2.attach(SERVO2);
+
+    Serial.println("IMU initialized. Reading data...");
+}
+
+//loop
+void loop()
+{
+    int16_t ax = readAccelX();
+    int16_t gx = readGyroX();
+
+    Serial.print("Accel X: ");
+    Serial.print(ax);
+    Serial.print("   Gyro X: ");
+    Serial.println(gx);
+
+    // Example servo control
+    int servoPos = map(ax, -16000, 16000, 0, 180);
+    servoPos = constrain(servoPos, 0, 180);
+
+    servo1.write(servoPos);
+    servo2.write(180 - servoPos);
+
+    delay(20);
 }
